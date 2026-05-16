@@ -1,108 +1,67 @@
 """
-model1_dynamic_ttl.py
-=====================
-
-Model 1 — Dynamic TTL Adjustment
---------------------------------
-
-    TTL(mac) = TTL_base * alpha * F_activity * F_stability * F_pressure
-
-    F_activity  = 1 + log(1 + tx_count)         # natural log
-    F_stability = 1 / (1 + flap_count)
-    F_pressure  = 1 - (occupied / capacity)
-
-Regimes (from Slides 2 and 3):
-    ACTIVE     : tx_count >= 16
-    IDLE       : 1 <= tx_count <= 15
-    INACTIVE   : tx_count == 0
-    STABLE     : flap_count == 0
-    FLAPPING   : 1 <= flap_count <= 9
-    UNSTABLE   : flap_count >= 10
-    NOT FULL   : occupancy < 0.65
-    NEARLY FULL: 0.65 <= occupancy < 0.85
-    FULL       : occupancy >= 0.85
+Model 1: Dynamic TTL Adjustment (Shrink or Extend Expiry)
+Instead of a fixed aging timer, computing TTL per entry based on real-time factors.
 """
-
-from __future__ import annotations
 
 import math
 
 
-class DynamicTTLModel:
-    def __init__(self, ttl_base: float = 300.0, alpha: float = 0.5):
-        self.ttl_base = ttl_base
-        self.alpha = alpha
+def calculate_dynamic_ttl(
+    tx_count, flap_count, occupied, capacity=1000, ttl_base=300, alpha=0.5
+):
+    """Computes dynamic TTL for an entry.
 
-    # --- individual factors (kept separate so callers can introspect) ----
-    @staticmethod
-    def f_activity(tx_count: int) -> float:
-        return 1.0 + math.log(1 + tx_count)
+    Formula: TTL(mac) = TTL_base * alpha * F_activity * F_stability * F_pressure
+    """
+    # 1. Activity Factor (If Higher tx_count -> entry stays longer)
+    f_activity = 1 + math.log(1 + tx_count)
 
-    @staticmethod
-    def f_stability(flap_count: int) -> float:
-        return 1.0 / (1 + flap_count)
+    # 2. Stability Factor (Flapping MAC -> shrinks fast)
+    f_stability = 1 / (1 + flap_count)
 
-    @staticmethod
-    def f_pressure(occupied: int, capacity: int) -> float:
-        if capacity <= 0:
-            return 0.0
-        return 1.0 - (occupied / capacity)
+    # 3. Table Pressure Factor (Full table -> shrinks to free space)
+    occupancy_ratio = occupied / capacity
+    f_pressure = 1 - occupancy_ratio
 
-    # --- main API --------------------------------------------------------
-    def compute_ttl(self, tx_count: int, flap_count: int,
-                    occupied: int, capacity: int) -> float:
-        return (self.ttl_base
-                * self.alpha
-                * self.f_activity(tx_count)
-                * self.f_stability(flap_count)
-                * self.f_pressure(occupied, capacity))
+    
+    ttl = ttl_base * alpha * f_activity * f_stability * f_pressure
 
-    # --- regime labels (handy for logging / dashboards) ------------------
-    @staticmethod
-    def activity_state(tx_count: int) -> str:
-        if tx_count == 0:
-            return "INACTIVE"
-        if tx_count <= 15:
-            return "IDLE"
-        return "ACTIVE"
+    # State classifications 
+    activity_state = (
+        "ACTIVE"
+        if tx_count >= 16
+        else ("IDLE" if 1 <= tx_count <= 15 else "INACTIVE")
+    )
+    stability_state = (
+        "STABLE"
+        if flap_count == 0
+        else ("UNSTABLE" if flap_count >= 10 else "FLAPPING")
+    )
 
-    @staticmethod
-    def stability_state(flap_count: int) -> str:
-        if flap_count == 0:
-            return "STABLE"
-        if flap_count <= 9:
-            return "FLAPPING"
-        return "UNSTABLE"
+    if occupancy_ratio >= 0.85:
+        pressure_state = "FULL (Eviction Active)"
+    elif occupancy_ratio >= 0.65:
+        pressure_state = "NEARLY FULL (Compression Begins)"
+    else:
+        pressure_state = "NOT FULL (Runs Freely)"
 
-    @staticmethod
-    def pressure_state(occupied: int, capacity: int) -> str:
-        occ = occupied / capacity if capacity else 1.0
-        if occ < 0.65:
-            return "NOT_FULL"
-        if occ < 0.85:
-            return "NEARLY_FULL"
-        return "FULL"
+    return {
+        "ttl_seconds": round(ttl, 2),
+        "states": {
+            "activity": activity_state,
+            "stability": stability_state,
+            "pressure": pressure_state,
+        },
+    }
 
 
-# ---------------------------------------------------------------------------
-# Demo — reproduces Slide 4 worked examples
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    ttl = DynamicTTLModel(ttl_base=300.0, alpha=0.5)
+    print("--- Testing Model 1: Dynamic TTL ---")
 
-    print("Model 1 — Dynamic TTL Adjustment")
-    print("-" * 50)
+    # Example 1: Active, stable(no flapping), low occupancy (Should EXTEND)
+    test1 = calculate_dynamic_ttl(tx_count=50, flap_count=0, occupied=400)
+    print(f"Test 1 (Active/Stable): {test1['ttl_seconds']}s -> {test1['states']}")
 
-    ttl1 = ttl.compute_ttl(tx_count=50, flap_count=0, occupied=40, capacity=100)
-    print(f"  tx=50, flap=0, occ=40%  -> TTL = {ttl1:7.2f} s  "
-          f"(EXTEND, slide ~443)")
-
-    ttl2 = ttl.compute_ttl(tx_count=2, flap_count=4, occupied=90, capacity=100)
-    print(f"  tx=2,  flap=4, occ=90%  -> TTL = {ttl2:7.2f} s  "
-          f"(SHRINK FAST, slide ~4.4)")
-
-    print()
-    print(f"  States for tx=50, flap=0, occ=40%:")
-    print(f"    activity  = {ttl.activity_state(50)}")
-    print(f"    stability = {ttl.stability_state(0)}")
-    print(f"    pressure  = {ttl.pressure_state(40, 100)}")
+    # Example 2: Inactive, flapping, high occupancy (Should SHRINK FAST)
+    test2 = calculate_dynamic_ttl(tx_count=2, flap_count=4, occupied=900)
+    print(f"Test 2 (Unstable/High Load): {test2['ttl_seconds']}s -> {test2['states']}")
