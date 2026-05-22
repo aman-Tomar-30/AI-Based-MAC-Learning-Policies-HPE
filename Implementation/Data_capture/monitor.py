@@ -3,14 +3,14 @@ import time
 import re
 from collections import defaultdict
 from generate_csv import get_output_csv
+
 """
 This script collects:
 
 1. MAC Table Entries
 2. Flood Pressure
-3. Port Traffic
-4. Entry Age
-5. New MAC Rate
+3. Entry Age
+
 """
 
 # =========================
@@ -20,21 +20,14 @@ This script collects:
 SWITCHES = subprocess.check_output(["ovs-vsctl", "list-br"], text=True).split()   #gives list of switches
 SWITCH = SWITCHES[0]
 print(SWITCHES[0])
+
 INTERVAL = 3              # seconds
 
 # Estimated limits (customize according to topology)
 MAX_MAC_CAPACITY = 20
-MAX_FLOOD_RATE = 1000
-MAX_BANDWIDTH = 1000000000   # 1 Gbps
+MAX_FLOOD_RATE = 10000       
 MAX_ENTRY_AGE = 300          # seconds
-MAX_MAC_RATE = 20
 
-# =========================
-# GLOBAL STATE
-# =========================
-
-previous_mac_set = set()
-previous_port_stats = {}
 
 # =========================
 # HELPER FUNCTIONS - which run commands on terminal
@@ -123,37 +116,7 @@ def get_flood_pressure(sw):
 
 
 # =========================================================
-# 3. PORT TRAFFIC
-# =========================================================
-
-def get_port_traffic(sw):
-    """
-    Fetch port statistics
-    """
-
-    try:
-        output = run_cmd(f"ovs-ofctl dump-ports {sw}")
-
-        total_rx = 0
-        total_tx = 0
-
-        rx_matches = re.findall(r"rx pkts=\d+, bytes=(\d+)", output)
-        tx_matches = re.findall(r"tx pkts=\d+, bytes=(\d+)", output)
-
-        total_rx = sum(map(int, rx_matches))
-        total_tx = sum(map(int, tx_matches))
-
-        bandwidth = total_rx + total_tx
-
-        return bandwidth
-
-    except Exception as e:
-        print(f"[ERROR] Port stats failed: {e}")
-        return 0
-
-
-# =========================================================
-# 4. ENTRY AGE
+# 3. ENTRY AGE
 # =========================================================
 
 def calculate_entry_age(mac_entries):
@@ -164,31 +127,6 @@ def calculate_entry_age(mac_entries):
     ages = [entry["age"] for entry in mac_entries]
 
     return sum(ages) / len(ages)
-
-
-# =========================================================
-# 5. NEW MAC RATE
-# =========================================================
-
-def calculate_new_mac_rate(mac_entries):
-    """
-    Calculate rate of new MAC arrivals
-    """
-
-    global previous_mac_set
-
-    current_mac_set = set()
-
-    for entry in mac_entries:
-        current_mac_set.add(entry["mac"])
-
-    new_entries = current_mac_set - previous_mac_set
-
-    rate = len(new_entries) / INTERVAL
-
-    previous_mac_set = current_mac_set
-
-    return rate
 
 
 # =========================================================
@@ -212,10 +150,11 @@ def monitor(sw):
     print("\n========== SDN MONITOR STARTED ==========\n")
     data = []
 
-    for n in range(3): #no.of lines of data you want
+    for n in range(100): #no.of lines of data you want
 
 
         #print(f"\n========== SWITCH {sw} ==========")
+        
         # -----------------------------------
         # MAC TABLE
         # -----------------------------------
@@ -236,30 +175,12 @@ def monitor(sw):
         )
 
         # -----------------------------------
-        # PORT TRAFFIC
-        # -----------------------------------
-        bandwidth = get_port_traffic(sw)
-        traffic_load = normalize(
-            bandwidth,
-            MAX_BANDWIDTH
-        )
-
-        # -----------------------------------
         # ENTRY AGE
         # -----------------------------------
         avg_age = calculate_entry_age(mac_entries)
         age_score = normalize(
             avg_age,
             MAX_ENTRY_AGE
-        )
-
-        # -----------------------------------
-        # NEW MAC RATE
-        # -----------------------------------
-        new_mac_rate = calculate_new_mac_rate(mac_entries)
-        mac_growth = normalize(
-            new_mac_rate,
-            MAX_MAC_RATE
         )
 
         # ===================================
@@ -269,24 +190,19 @@ def monitor(sw):
         print(f"\n[1] MAC Table Entries")
         print(f"Current Entries : {current_entries}")
         print(f"Fill Percentage : {mac_fill}")
+
         print(f"\n[2] Flood Pressure")
         print(f"Flood Packets   : {flood_rate}")
         print(f"Flood Score     : {flood_pressure}")
-        print(f"\n[4] Entry Age")
+
+        print(f"\n[3] Entry Age")
         print(f"Average Age     : {avg_age:.2f} sec")
         print(f"Age Score       : {age_score}")
-
-        
-        print(f"\n[3] Port Traffic")
-        print(f"Bandwidth Usage : {bandwidth} bytes")
-        print(f"Traffic Score   : {traffic_load}")
-        print(f"\n[5] New MAC Rate")
-        print(f"New MAC/sec     : {new_mac_rate:.2f}")
-        print(f"Growth Score    : {mac_growth}")
         
         """
-        #STATES - MAC_FILL FLOOD_PRESSURE AVG_AGE 
-        state = [mac_fill, flood_pressure, round(avg_age,2)]
+
+        #STATES - MAC_FILL FLOOD_PRESSURE AVG_SCORE 
+        state = [mac_fill, flood_pressure, age_score]
         print(f"States: {state}")
         data.append(state)
 
